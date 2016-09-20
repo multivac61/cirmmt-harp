@@ -1,0 +1,2 @@
+void MadgwickQuaternionUpdate(float *q, float *accData, float *gyrData, float *magData, float delta_t);
+void MahonyQuaternionUpdate(float *q, float *accData, float *gyrData, float *magData, float delta_t);
