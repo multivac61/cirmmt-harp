@@ -41,6 +41,7 @@ The module is sends a continuous stream of OSC messages over UDP to a port defin
 
 ## Hardware 
 ![Hardware prototype working!](images/hardware_prototypes.png)
+
 In the future I will put the schematics we made for this project in a sperate folder.
 
 ## 3D models
