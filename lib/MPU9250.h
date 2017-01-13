@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "RTMath.h"
 
 // Register variables
 #define MPU9250_DEV_ID              0x71
@@ -121,6 +122,19 @@
 #define MPU9250_RA_SELF_TEST_Y_ACCEL 0x0E
 #define MPU9250_RA_SELF_TEST_Z_ACCEL 0x0F
 
+// I'm pretty sure the RTIMU library was expecting gyro data in radians
+// Using the figure of 0.20 the device never gathers enough data to
+// complete gyro bias calculation.
+// Treating the 0.20 figure as radians, the gyro bias calculation is OK
+// This defines the gyroscope noise level
+#define RTIMU_FUZZY_GYRO_ZERO           (RTFLOAT)0.20 * 180 / RTMATH_PI
+#define RTIMU_FUZZY_GYRO_ZERO_SQUARED   (RTIMU_FUZZY_GYRO_ZERO * RTIMU_FUZZY_GYRO_ZERO)
+
+// This defines the accelerometer noise level
+#define RTIMU_FUZZY_ACCEL_ZERO          (RTFLOAT)0.05
+#define RTIMU_FUZZY_ACCEL_ZERO_SQUARED (RTIMU_FUZZY_ACCEL_ZERO * RTIMU_FUZZY_ACCEL_ZERO)
+
+
 // Options
 enum ASCALE {
   AFS_2G = 0,
@@ -165,9 +179,9 @@ class MPU9250 {
         float    deltat = 0.0f, sum = 0.0f;        // integration interval for both filter schemes
         uint32_t lastUpdate = 0, firstUpdate = 0;  // used to calculate integration interval
         uint32_t Now = 0;                          // used to calculate integration interval
-        uint8_t  Gscale = GFS_250DPS;
-        uint8_t  Ascale = AFS_2G;
-        uint8_t  Mscale = MFS_16BITS; // Choose either 14-bit or 16-bit magnetometer resolution
+        uint8_t  Gscale = GFS_2000DPS;
+        uint8_t  Ascale = AFS_8G;
+        uint8_t  Mscale = MFS_14BITS; // Choose either 14-bit or 16-bit magnetometer resolution
         uint8_t  Mmode = 0x06;        // WAS 2!! 2 for 8 Hz, 6 for 100 Hz continuous magnetometer data read
         float    aRes, gRes, mRes;      // scale resolutions per LSB for the sensors
 
@@ -180,6 +194,8 @@ class MPU9250 {
         float   temperature;         // Stores the real internal chip temperature in Celsius
         float   SelfTest[6];         // holds results of gyro and accelerometerself test
         float   SelfTestResults[6] = {0, 0, 0, 0, 0, 0};
+
+        float m_deltat, m_lastTimestamp, m_timestamp;
         
         
       public:
@@ -190,6 +206,17 @@ class MPU9250 {
         float magCalibration[3] = {0, 0, 0}, 
               magBias[3]        = {0, 0, 0}, 
               magScale[3]       = {0, 0, 0};
+
+
+        RTVector3 m_accel, m_gyro, m_compass;
+        RTVector3 m_accelMin, m_accelMax, m_magOffset, m_magScale,  m_gyroBias, m_previousAccel;
+        float m_gyroAlpha;
+        uint16_t m_gyroSampleCount;
+
+        bool m_magCalValid, m_gyroCalValid, m_calibrationMode, m_accelCalValid;
+
+        int m_sampleRateGyroAccel = 100;
+
         MPU9250();
         MPU9250(uint8_t address);
 
@@ -213,6 +240,11 @@ class MPU9250 {
 
         void elapseTime();
         void updateFilter(float* q);
+
+        // Calibrate
+        void handleGyroBias();
+        void handleAccelBias();
+        void handleMagBias();
 
         // AUX_VDDIO register
         uint8_t getAuxVDDIOLevel();

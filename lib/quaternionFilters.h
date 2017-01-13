@@ -1,2 +1,7 @@
-void MadgwickQuaternionUpdate(float *q, float *accData, float *gyrData, float *magData, float delta_t);
-void MahonyQuaternionUpdate(float *q, float *accData, float *gyrData, float *magData, float delta_t);
+#ifndef QUATERNIONFILTERS_H
+#define QUATERNIONFILTERS_H
+
+void MadgwickQuaternionUpdate(float *q, const RTVector3& accData, const RTVector3& gyrData, const RTVector3& magData, float delta_t);
+void MahonyQuaternionUpdate(float *q, const RTVector3& accData, const RTVector3& gyrData, const RTVector3& magData, float delta_t);
+
+#endif  //  QUATERNIONFILTERS_H

@@ -10,9 +10,9 @@ MPU9250::MPU9250(uint8_t address) {
   devAddr = address;
 
   // magnitude bias, should update AUTOMATICALLY!!
-  this->magBias[0] = +470.;  // User environmental x-axis correction in milliGauss, should be automatically calculated
-  this->magBias[1] = +120.;  // User environmental y-axis correction in milliGauss
-  this->magBias[2] = +125.;  // User environmental z-axis correction in milliGauss
+  // this->magBias[0] = +470.;  // User environmental x-axis correction in milliGauss, should be automatically calculated
+  // this->magBias[1] = +120.;  // User environmental y-axis correction in milliGauss
+  // this->magBias[2] = +125.;  // User environmental z-axis correction in milliGauss
 
   switch (Ascale)
   {
@@ -57,10 +57,10 @@ MPU9250::MPU9250(uint8_t address) {
     // Possible magnetometer scales (and their register bit settings) are:
     // 14 bit resolution (0) and 16 bit resolution (1)
     case MFS_14BITS:
-      mRes = 10.*4912. / 8190.; // Proper scale to return milliGauss
+      mRes = 4912. / 8190.; // Proper scale to return microteslas
       break;
     case MFS_16BITS:
-      mRes = 10.*4912. / 32760.0; // Proper scale to return milliGauss
+      mRes = 4912. / 32760.0; // Proper scale to return microteslas
       break;
   }
 }
@@ -444,6 +444,146 @@ void MPU9250::init() {
   // and enable continuous mode data acquisition Mmode (bits [3:0]), 0010 for 8 Hz and 0110 for 100 Hz sample rates
   writeByte(MPU9250_RA_MAG_ADDRESS, MPU9250_RA_ZA_OFFS_H, Mscale << 4 | Mmode); // Set magnetometer data resolution and sample ODR
   delay(10);
+
+  // Load Calibration 
+  // Load all calibration values.
+  // Bias coefficients gathered offline
+  // m_accelMin.setX(-0.923096);
+  // m_accelMin.setY(-1.1);
+  // m_accelMin.setZ(-1.156);
+
+  // m_accelMax.setX(1.22095);
+  // m_accelMax.setY(1.04102);
+  // m_accelMax.setZ(0.76295);  
+
+  m_accelMin.setX(0.979375); // This is correct. See RTArduiLinkIMU.
+  m_accelMin.setY(-1.026615);
+  m_accelMin.setZ(-1.299899);
+
+  m_accelMax.setX(-1.171786);
+  m_accelMax.setY(1.052726);
+  m_accelMax.setZ(0.774277);
+  m_accelCalValid = true;
+
+
+  RTVector3 magMin, magMax;
+  // magMin.setX(-30.6089);
+  // magMin.setY(-75.7658);
+  // magMin.setZ(-128.3209);
+
+  // magMax.setX(69.0919);
+  // magMax.setY(22.6125);
+  // magMax.setZ(-20.6466);  
+
+  // Data straight from RTIMU
+  // magMin.setX(-28.800386);
+  // magMin.setY(-72.245964);
+  // magMin.setZ(-128.874023);
+
+  // magMax.setX(69.096954);
+  // magMax.setY(22.576708);
+  // magMax.setZ(-24.860378);
+
+  // Data aligned for our scenario
+  magMin.setX(-29.576708);
+  magMin.setY(-26.800386);
+  magMin.setZ(24.860378);
+
+  magMax.setX(72.245964);
+  magMax.setY(75.096954);
+  magMax.setZ(128.874023);
+
+  float maxDelta = -1;
+  float delta;
+
+  //  find biggest range
+  for (int i = 0; i < 3; i++) {
+    if ((magMax.data(i) - magMin.data(i)) > maxDelta)
+      maxDelta = magMax.data(i) - magMin.data(i);
+  }
+
+  maxDelta /= 2.0f;                                          // this is the max +/- range
+
+  for (int i = 0; i < 3; i++) {
+    delta = (magMax.data(i) - magMin.data(i)) / 2.0f;
+    m_magScale.setData(i, maxDelta / delta);            // makes everything the same range
+    m_magOffset.setData(i, (magMax.data(i) + magMin.data(i)) / 2.0f);
+  }
+
+  m_magCalValid = true;
+
+
+  m_gyroAlpha = 2.0f / m_sampleRateGyroAccel;
+  m_gyroSampleCount = 0;
+
+  m_calibrationMode = false;
+}
+
+void MPU9250::handleGyroBias() {
+  if(!m_calibrationMode) {
+    // This could also be done in the host software
+    // and calibration values sent to client via BLE,
+    // just like accel and compass bias.
+    if (!m_gyroCalValid) {
+      // nrf_gpio_pin_write(16, 1);
+
+      RTVector3 deltaAccel = m_previousAccel;
+      deltaAccel -= m_accel;   // compute difference
+      m_previousAccel = m_accel;
+
+      if ((deltaAccel.squareLength() < RTIMU_FUZZY_ACCEL_ZERO_SQUARED) &&
+        (m_gyro.squareLength() < RTIMU_FUZZY_GYRO_ZERO_SQUARED)) {
+        // what we are seeing on the gyros should be bias only so learn from this
+        m_gyroBias.setX((1.0 - m_gyroAlpha) * m_gyroBias.x() + m_gyroAlpha * m_gyro.x());
+        m_gyroBias.setY((1.0 - m_gyroAlpha) * m_gyroBias.y() + m_gyroAlpha * m_gyro.y());
+        m_gyroBias.setZ((1.0 - m_gyroAlpha) * m_gyroBias.z() + m_gyroAlpha * m_gyro.z());
+
+        if (m_gyroSampleCount < (5 * m_sampleRateGyroAccel)) {
+          m_gyroSampleCount++;
+
+          if (m_gyroSampleCount == (5 * m_sampleRateGyroAccel)) {
+            m_gyroCalValid = true;
+
+            // nrf_gpio_pin_write(16, 0);
+          }
+        }
+      }
+    }
+
+    m_gyro -= m_gyroBias;
+  }
+}
+
+void MPU9250::handleAccelBias() {
+  if(!m_calibrationMode && m_accelCalValid) {
+    if(m_accel.x() >= 0) {
+      m_accel.setX(m_accel.x() / m_accelMax.x());  
+    } else {
+      m_accel.setX(m_accel.x() / -m_accelMin.x());  
+    }
+
+    if(m_accel.y() >= 0) {
+      m_accel.setY(m_accel.y() / m_accelMax.y());  
+    } else {
+      m_accel.setY(m_accel.y() / -m_accelMin.y());  
+    }
+
+    if(m_accel.z() >= 0) {
+      m_accel.setZ(m_accel.z() / m_accelMax.z());  
+    } else {
+      m_accel.setZ(m_accel.z() / -m_accelMin.z());  
+    }
+  }
+}
+
+void MPU9250::handleMagBias() {
+  if(!m_calibrationMode && m_magCalValid) {
+    m_compass -= m_magOffset;  
+
+    m_compass.setX(m_compass.x() * m_magScale.x());
+    m_compass.setY(m_compass.y() * m_magScale.y());
+    m_compass.setZ(m_compass.z() * m_magScale.z());
+  }
 }
 
 
@@ -506,9 +646,9 @@ void MPU9250::readAccData() {
   this->accData[1] = ((int16_t)rawData[2] << 8) | rawData[3] ;
 
   // Now we'll calculate the accleration value into actual g's
-  this->acc[0] = (float)this->accData[0] * aRes; // - accelBias[0];
-  this->acc[1] = (float)this->accData[1] * aRes; // - accelBias[1];
-  this->acc[2] = (float)this->accData[2] * aRes; // - accelBias[2];
+  m_accel.setX((float)this->accData[0] * aRes); // - accelBias[0];
+  m_accel.setY((float)this->accData[1] * aRes); // - accelBias[1];
+  m_accel.setZ((float)this->accData[2] * aRes); // - accelBias[2];
 }
 
 
@@ -523,9 +663,9 @@ void MPU9250::readGyrData() {
   this->gyrData[1] = ((int16_t)rawData[2] << 8) | rawData[3];
 
   // get actual gyro value, this depends on scale being set
-  this->gyr[0] = (float)this->gyrData[0] * gRes;
-  this->gyr[1] = (float)this->gyrData[1] * gRes;
-  this->gyr[1] = (float)this->gyrData[1] * gRes;
+  m_gyro.setX((float)this->gyrData[0] * gRes);
+  m_gyro.setY((float)this->gyrData[1] * gRes);
+  m_gyro.setZ((float)this->gyrData[1] * gRes);
 }
 
 
@@ -534,17 +674,9 @@ void MPU9250::readGyrData() {
 */
 void MPU9250::readMagData() {
   uint8_t rawData[7];  // xyz gyro register data, ST2 register stored here, must read ST2 at end of data acquisition
-  // delay(10);
-  // Serial.println(readByte(MPU9250_RA_MAG_ADDRESS, MPU9250_RA_MAG_ST1));
-  // delay(10);
-  // Serial.println(readByte(MPU9250_RA_MAG_ADDRESS, MPU9250_RA_MAG_ST1) & 0x01);
   if (readByte(MPU9250_RA_MAG_ADDRESS, MPU9250_RA_MAG_ST1) & 0x01) { // delay for magnetometer data ready bit to be set
-    // delay(10);
+
     readBytes(MPU9250_RA_MAG_ADDRESS, MPU9250_RA_MAG_XOUT_L, 7, &rawData[0]);  // Read the six raw data and ST2 registers sequentially into data array
-    // Serial.println("Printing rawData[0,1,6]");
-    // Serial.println(rawData[0]);
-    // Serial.println(rawData[1]);
-    // Serial.println(rawData[6]);
     uint8_t c = rawData[6]; // End data read by reading ST2 register
     if (!(c & 0x08)) { // Check if magnetic sensor overflow set, if not then report data
       this->magData[0] = ((int16_t)rawData[1] << 8) | rawData[0];  // Turn the MSB and LSB into a signed 16-bit value
@@ -552,11 +684,21 @@ void MPU9250::readMagData() {
       this->magData[2] = ((int16_t)rawData[5] << 8) | rawData[4];
 
       // get actual magnetometer value, this depends on scale being set
-      this->mag[0] = (float)this->magData[0] * mRes * magCalibration[0] - magBias[0];
-      this->mag[1] = (float)this->magData[1] * mRes * magCalibration[1] - magBias[1];
-      this->mag[2] = (float)this->magData[2] * mRes * magCalibration[2] - magBias[2];
+      m_compass.setX((float)this->magData[0] * mRes * magCalibration[0]);
+      m_compass.setY((float)this->magData[1] * mRes * magCalibration[1]);
+      m_compass.setZ((float)this->magData[2] * mRes * magCalibration[2]);
     }
   }
+
+  // Handle axis rotation
+  // The accel and gyro axes are aligned
+  // The compass x-axis is aligned with accel/gyro y-axis
+  // The compass y-axis is aligned with accel/gyro x-axis
+  // The compass z-axis is inverted with respect to accel/gyro z-axis
+  float tmp = m_compass.x();
+  m_compass.setX(m_compass.y());
+  m_compass.setY(tmp);
+  m_compass.setZ(-m_compass.z());
 }
 
 
@@ -578,6 +720,15 @@ void MPU9250::readAllData() {
   readAccData();
   readGyrData();
   readMagData();
+
+  // Handle biases
+  handleAccelBias();
+  handleGyroBias();
+  handleMagBias();
+
+  m_lastTimestamp = m_timestamp;
+  m_timestamp = millis();
+  m_deltat = (m_timestamp - m_lastTimestamp) / 1000.0f;
 }
 
 
@@ -593,7 +744,7 @@ void MPU9250::updateFilter(float* q) {
   // For the MPU-9250, we have chosen a magnetic rotation that keeps the sensor forward along the x-axis just like
   // in the LSM9DS0 sensor. This rotation can be modified to allow any convenient orientation convention.
   // This is ok by aircraft orientation standards!
-  MahonyQuaternionUpdate(q, this->acc, this->gyr, this->mag, deltat);
+  MadgwickQuaternionUpdate(q, m_accel, m_gyro, m_compass, deltat);
 }
 
 

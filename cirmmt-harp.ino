@@ -11,32 +11,24 @@ extern "C" {
 #include "user_interface.h"
 }
 
-#define SERIAL_DEBUG true // Print initialization messages over serial
-#define SERIAL_PROC false // Print data messages over serial
-#define WAIT_WIFI 30      // UDP send interval
-#define WAIT_FILTER 10    // quaternion filter process interval
+#define SERIAL_DEBUG true      // Print initialization messages over serial
+#define SERIAL_PROC false      // Print data messages over serial
+#define SEND_CALIBRATION false // Send calibration constants over UDP
+#define WAIT_WIFI 5           // UDP send interval
 
 // Initialization of software interrupt functions
 os_timer_t wifiTimer;
 os_timer_t filterTimer;
 
 bool interrupt_wifi;
-bool interrupt_filter;
 
 void timerCallback(void *pArg) {
   interrupt_wifi = true;
 }
 
-void filterCallback(void *pArg) {
-  interrupt_filter = true;
-}
-
 void user_init(void) {
   os_timer_setfn(&wifiTimer, timerCallback, NULL);
   os_timer_arm(&wifiTimer, WAIT_WIFI, true);
-
-  os_timer_setfn(&filterTimer, filterCallback, NULL);
-  os_timer_arm(&filterTimer, WAIT_FILTER, true);
 }
 
 // Vector to hold quaternion data
@@ -54,12 +46,12 @@ const char* password = "";
 #define SEND_PORT 58039   // Port for outgoing OSC messages
 
 // Static IP address of module
-IPAddress home(192, 168, 1, 101); 
+IPAddress home(192, 168, 10, 44); 
 IPAddress broadcast(192, 168, 1, 255);
 IPAddress mask(255, 255, 255, 0);
 
 // Static IP of receiving client
-IPAddress sendIP(192, 168, 1, 42);
+IPAddress sendIP(192, 168, 10, 103);
 
 // Global variable for haptic motor
 Adafruit_DRV2605 drv;
@@ -107,15 +99,6 @@ void setup() {
   }
 
   if (SERIAL_DEBUG) Serial.println("MPU9250 is online...");
-
-  imu.selfTest();
-  imu.selfTestReport();
-
-  Serial.println("MPU9250 calibration");
-  imu.calibrate();
-
-  Serial.println("MPU9250 magnetometer calibration");
-  imu.calibrate_mag();
 
   imu.init();
 
@@ -178,7 +161,6 @@ void setup() {
 
   // Software interrupts
   interrupt_wifi = false;
-  interrupt_filter = false;
   user_init();
 }
 
@@ -220,14 +202,9 @@ void loop() {
       setColor(r, g, b);
     }
   }
-  
 
   if (imu.isInterrupted()) {
     imu.readAllData();
-  }
-
-  if (interrupt_filter) {
-    interrupt_filter = false;
     imu.updateFilter(q);
   }
 
@@ -260,34 +237,85 @@ void loop() {
     udp.endPacket();
 
     OSCMessage msg_acc("/acc");
-    msg_acc.add(imu.acc[0]);
-    msg_acc.add(imu.acc[1]);
-    msg_acc.add(imu.acc[2]);
+    msg_acc.add(imu.m_accel.x());
+    msg_acc.add(imu.m_accel.y());
+    msg_acc.add(imu.m_accel.z());
     udp.beginPacket(sendIP, SEND_PORT);
     msg_acc.send(udp);
     udp.endPacket();
+    
 
     OSCMessage msg_gyr("/gyr");
-    msg_gyr.add(imu.gyr[0]);
-    msg_gyr.add(imu.gyr[1]);
-    msg_gyr.add(imu.gyr[2]);
+    msg_gyr.add(imu.m_gyro.x());
+    msg_gyr.add(imu.m_gyro.y());
+    msg_gyr.add(imu.m_gyro.z());
     udp.beginPacket(sendIP, SEND_PORT);
     msg_gyr.send(udp);
     udp.endPacket();
 
     OSCMessage msg_mag("/mag");
-    msg_mag.add(imu.mag[0]);
-    msg_mag.add(imu.mag[1]);
-    msg_mag.add(imu.mag[2]);
+    msg_mag.add(imu.m_compass.x());
+    msg_mag.add(imu.m_compass.y());
+    msg_mag.add(imu.m_compass.z());
     udp.beginPacket(sendIP, SEND_PORT);
     msg_mag.send(udp);
     udp.endPacket();
 
+    if(SEND_CALIBRATION){
+      OSCMessage msg_acc_max("/acc_max");
+      msg_acc_max.add(imu.m_accelMax.x());
+      msg_acc_max.add(imu.m_accelMax.y());
+      msg_acc_max.add(imu.m_accelMax.z());
+      udp.beginPacket(sendIP, SEND_PORT);
+      msg_acc_max.send(udp);
+      udp.endPacket();
+
+      OSCMessage msg_acc_min("/acc_min");
+      msg_acc_min.add(imu.m_accelMin.x());
+      msg_acc_min.add(imu.m_accelMin.y());
+      msg_acc_min.add(imu.m_accelMin.z());
+      udp.beginPacket(sendIP, SEND_PORT);
+      msg_acc_min.send(udp);
+      udp.endPacket();
+
+      OSCMessage msg_mag_offset("/mag_offset");
+      msg_mag_offset.add(imu.m_magOffset.x());
+      msg_mag_offset.add(imu.m_magOffset.y());
+      msg_mag_offset.add(imu.m_magOffset.z());
+      udp.beginPacket(sendIP, SEND_PORT);
+      msg_mag_offset.send(udp);
+      udp.endPacket();
+
+      OSCMessage msg_mag_scale("/mag_scale");
+      msg_mag_scale.add(imu.m_magScale.x());
+      msg_mag_scale.add(imu.m_magScale.y());
+      msg_mag_scale.add(imu.m_magScale.z());
+      udp.beginPacket(sendIP, SEND_PORT);
+      msg_mag_scale.send(udp);
+      udp.endPacket();
+    }
+
     if (SERIAL_PROC) {
-      Serial.print("Orientation: ");
-      Serial.print(yaw);   Serial.print(" ");
-      Serial.print(pitch); Serial.print(" ");
-      Serial.println(roll);
+      Serial.print("Accel: ");
+      Serial.print(imu.m_accel.x(), 6);   Serial.print(" ");
+      Serial.print(imu.m_accel.y(), 6); Serial.print(" ");
+      Serial.println(imu.m_accel.z(), 6);
+
+      Serial.print("Gyro: ");
+      Serial.print(imu.m_gyro.x(), 6);   Serial.print(" ");
+      Serial.print(imu.m_gyro.y(), 6); Serial.print(" ");
+      Serial.println(imu.m_gyro.z(), 6);
+
+      Serial.print("Compass: ");
+      Serial.print(imu.m_compass.x(), 6);   Serial.print(" ");
+      Serial.print(imu.m_compass.y(), 6); Serial.print(" ");
+      Serial.println(imu.m_compass.z(), 6);
+
+      Serial.print("Quaternion: ");
+      Serial.print(q[0], 6);   Serial.print(" ");
+      Serial.print(q[1], 6); Serial.print(" ");
+      Serial.print(q[2], 6); Serial.print(" ");
+      Serial.println(q[3], 6);
     }
   }
 
