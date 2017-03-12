@@ -1,20 +1,63 @@
 #include <Wire.h>
-#include "lib/MPU9250.h"
+#include "MPU9250.h"
 #include "Adafruit_DRV2605.h"
 
 #include <WiFiUdp.h>
 #include <ESP8266WiFi.h>
 
-#include "lib/OSCMessage.h"
+#include "OSCMessage.h"
+#include "OSCData.h"
+#include "RTMath.h"
+
 
 extern "C" {
 #include "user_interface.h"
 }
 
 #define SERIAL_DEBUG true      // Print initialization messages over serial
-#define SERIAL_PROC false      // Print data messages over serial
+#define SERIAL_PROC  true      // Print data messages over serial
 #define SEND_CALIBRATION false // Send calibration constants over UDP
-#define WAIT_WIFI 5           // UDP send interval
+#define WAIT_WIFI 10           // UDP send interval
+
+#ifdef ARDUINO_ESP8266_ESP01 // CIRMMT HARP
+  #define SDA 12
+  #define SCL 13
+  #define RED_LED 5
+  #define GREEN_LED 4
+  #define BLUE_LED 15
+#elif  ARDUINO_ESP8266_ESP12 // HUZZA
+  #define SDA 12
+  #define SCL 13
+  #define MPU9250_ADDRESS MPU9250_ADDRESS_AD0_LOW
+  // #define SDA 4
+  // #define SCL 5
+  // #define MPU9250_ADDRESS MPU9250_ADDRESS_AD0_LOW
+  #define RED_LED 5
+  #define GREEN_LED 4
+  #define BLUE_LED 15
+#else
+  #define SDA 12
+  #define SCL 13
+  // #define SDA 4
+  // #define SCL 5
+  #define RED_LED 5
+  #define GREEN_LED 4
+  #define BLUE_LED 15
+#endif
+
+// RECEIVER CODES
+enum RECEIVE
+{
+  RECEIVE_HAPTIC             = 'd',
+  RECEIVE_LED                = 'l',
+  RECEIVE_RECENTER           = 'r',
+  RECEIVE_BETA_ZETA          = 'b',
+  RECEIVE_HANDLE_CALIBRATION = 'h',
+  RECEIVE_ACCEL_SENSOR_ERROR = 'a',
+  RECEIVE_GYRO_SENSOR_ERROR  = 'g',
+  RECEIVE_MAG_SENSOR_ERROR   = 'm',
+  RECEIVE_CLEAR_CALIBRATION  = 'c'
+};
 
 // Initialization of software interrupt functions
 os_timer_t wifiTimer;
@@ -31,35 +74,41 @@ void user_init(void) {
   os_timer_arm(&wifiTimer, WAIT_WIFI, true);
 }
 
-// Vector to hold quaternion data
-float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+// MPU9250 imu(MPU9250_ADDRESS_AD0_HIGH);
+MPU9250 imu(MPU9250_ADDRESS);
 
-MPU9250 imu(MPU9250_DEFAULT_ADDRESS);
-
-// Wifi configuration //
+// Wifi configuration
 WiFiUDP udp;
 
-// Define the SSID and password of network
-const char* ssid = "";
-const char* password = "";
-#define LISTEN_PORT 5001  // Port for incoming OSC messages
-#define SEND_PORT 58039   // Port for outgoing OSC messages
+// Define the SSID and PASSWORD of network
+const char* SSID = "bodysuit";
+const char* PASSWORD = "bodysuit";
 
-// Static IP address of module
-IPAddress home(192, 168, 10, 44); 
+// Unique identifier for given chip.
+const int LAST_IP_HOST = 141;
+const int LAST_IP_CLIENT = 111;
+
+IPAddress home(192, 168, 1, LAST_IP_HOST); 
 IPAddress broadcast(192, 168, 1, 255);
 IPAddress mask(255, 255, 255, 0);
 
+#define LISTEN_PORT 5001  // Port for incoming OSC messages
+#define SEND_PORT 50000 + LAST_IP_HOST    // Port for outgoing OSC messages
+
 // Static IP of receiving client
-IPAddress sendIP(192, 168, 10, 103);
+IPAddress sendIP(192, 168, 1, LAST_IP_CLIENT);
+// IPAddress sendIP(192, 168, 10, 10Float
 
 // Global variable for haptic motor
+// 192.168.10.44
 Adafruit_DRV2605 drv;
 
 // Onboard RGB diode pins
-int redPin = 5;
-int greenPin = 4;
-int bluePin = 15;
+
+// RTQuaternion for recentering
+RTQuaternion q_recenter(1.0, 0.0, 0.0, 0.0), q_corr;
+RTQuaternion q(1.0, 0.0, 0.0, 0.0);
+RTVector3 eulerAngles;
 
 // Utility functions
 void printMessage(OSCMessage &msg){
@@ -76,17 +125,20 @@ void printMessage(OSCMessage &msg){
 }
 
 void setColor(int red, int green, int blue){
-  analogWrite(redPin, red);
-  analogWrite(greenPin, green);
-  analogWrite(bluePin, blue);  
+  analogWrite(RED_LED, red);
+  analogWrite(GREEN_LED, green);
+  analogWrite(BLUE_LED, blue);  
 }
 
+unsigned long time_now, time_past;
+unsigned long time_now_loop, time_past_loop;
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
 
-  Wire.begin(12, 13);
-
+  Wire.begin(SDA, SCL);
+  // Wire.setClock(400e3);
+  
   Serial.begin(38400);
   delay(500);
 
@@ -95,7 +147,7 @@ void setup() {
       Serial.print("MPU9250 "); Serial.print("I AM "); Serial.print(imu.getDeviceID(), HEX); Serial.print(" I should be "); Serial.println(0x71, HEX);
       Serial.println(". Could not connect to MPU9250");
     }
-    delay(500);
+    delay(100);
   }
 
   if (SERIAL_DEBUG) Serial.println("MPU9250 is online...");
@@ -104,30 +156,46 @@ void setup() {
 
   if (SERIAL_DEBUG) Serial.println("MPU9250 initialized for active data mode....");
 
-  while (!imu.testMagConnection()) {
-    if (SERIAL_DEBUG) {
-      Serial.print("AK8963 "); Serial.print("I AM "); Serial.print(imu.getMagID(), HEX); Serial.print(" I should be "); Serial.println(0x48, HEX);
-      Serial.println(". Could not connect to AK8963");
-    }
-    delay(500);
-  }
-
   if (SERIAL_DEBUG) {
-    Serial.println("Calibration values: ");
-    Serial.print("X-Axis sensitivity adjustment value "); Serial.println(imu.magCalibration[0], 2);
-    Serial.print("Y-Axis sensitivity adjustment value "); Serial.println(imu.magCalibration[1], 2);
-    Serial.print("Z-Axis sensitivity adjustment value "); Serial.println(imu.magCalibration[2], 2);
+    Serial.print("Magdwick beta, zeta values:");
+    Serial.print(imu.beta()); Serial.print(" ");
+    Serial.print(imu.zeta()); Serial.println();
+
+    Serial.print("Accel sensor error model.");
+    Serial.print("Enabled: "); Serial.print(imu.m_accelCalValid);
+    Serial.print(" Values: ");
+    Serial.print(imu.m_accelMin.x()); Serial.print(" ");
+    Serial.print(imu.m_accelMax.x()); Serial.print(" ");
+    Serial.print(imu.m_accelMin.y()); Serial.print(" ");
+    Serial.print(imu.m_accelMax.y()); Serial.print(" ");
+    Serial.print(imu.m_accelMin.z()); Serial.print(" ");
+    Serial.print(imu.m_accelMax.z()); Serial.println();
+
+    Serial.print("Compass sensor error model.");
+    Serial.print("Enabled: "); Serial.print(imu.m_magCalValid);
+    Serial.print(" Values: ");
+    Serial.print(imu.m_magOffset.x()); Serial.print(" ");
+    Serial.print(imu.m_magScale.x());  Serial.print(" ");
+    Serial.print(imu.m_magOffset.y()); Serial.print(" ");
+    Serial.print(imu.m_magScale.y());  Serial.print(" ");
+    Serial.print(imu.m_magOffset.z()); Serial.print(" ");
+    Serial.print(imu.m_magScale.z());  Serial.println();
+
+    Serial.print("Gyro sensor error model.");
+    Serial.print("Enabled: "); Serial.print(imu.m_gyroCalValid);
+    Serial.print(" Values: ");
+    Serial.print(imu.m_gyroBias.x()); Serial.print(" ");
+    Serial.print(imu.m_gyroBias.y()); Serial.print(" ");
+    Serial.print(imu.m_gyroBias.z()); Serial.println();
   }
 
   // Setup the wifi connection
   WiFi.disconnect();
-  delay(200);
-  WiFi.begin(ssid, password);         // Connect to Wifi network
+  WiFi.begin(SSID, PASSWORD);         // Connect to Wifi network
   WiFi.config(home, broadcast, mask); // Obtain a static IP address
-  delay(200);
 
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+    delay(100);
     if (SERIAL_DEBUG) {
       Serial.print(".");
     }
@@ -148,26 +216,27 @@ void setup() {
     Serial.println("Starting UDP");
     Serial.print("Local port: ");
     Serial.println(udp.localPort());
+    Serial.print("Remote port: ");
+    Serial.println(SEND_PORT);
     Serial.println("Setup complete!");
   }
 
-  drv.begin(12, 13);
+  drv.begin(SDA, SCL);
   drv.selectLibrary(1);
   drv.setMode(DRV2605_MODE_INTTRIG); 
 
-  pinMode(redPin, OUTPUT);
-  pinMode(greenPin, OUTPUT);
-  pinMode(bluePin, OUTPUT);
+  pinMode(RED_LED,   OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BLUE_LED,  OUTPUT);
 
   // Software interrupts
   interrupt_wifi = false;
   user_init();
 }
 
-
 void loop() {
   int size = udp.parsePacket();
-  if(size > 0){
+  if(size > 0) {
     OSCMessage incoming_osc;
     while(size--){
       incoming_osc.fill(udp.read());
@@ -179,59 +248,234 @@ void loop() {
     char address[64];
     int len = incoming_osc.getAddress(address, 0);
 
-    if(address[1] == 'd'){ // driver
-      int end = 0;
-      for(int i = 0; i < 8; i++){
-        int effect = incoming_osc.getInt(i);
-        if(effect < 0){
-          end = i;
-          break;
+    char id = address[1];
+    switch(id){
+      case RECEIVE_HAPTIC:{
+        int end = 0;
+        for(int i = 0; i < 8; i++){
+          int effect = incoming_osc.getInt(i);
+          if(effect < 0){
+            end = i;
+            break;
+          }
+
+          drv.setWaveform(i, effect);
+          end = i+1;
         }
 
-        drv.setWaveform(i, effect);
-        end = i+1;
+        drv.setWaveform(end, 0);
+        drv.go();
+        break;
       }
 
-      drv.setWaveform(end, 0);
-      drv.go();
+      case RECEIVE_LED:{
+        int r = incoming_osc.getInt(0);
+        int g = incoming_osc.getInt(1);
+        int b = incoming_osc.getInt(2);
+        setColor(r, g, b);
+        break;
+      }
 
-    } else if(address[1] == 'l'){ // LED 
-      int r = incoming_osc.getInt(0);
-      int g = incoming_osc.getInt(1);
-      int b = incoming_osc.getInt(2);
-      setColor(r, g, b);
+      case RECEIVE_RECENTER:{
+        RTQuaternion q0 = q;
+        RTQuaternion q1 = RTQuaternion(1, 0, 0, 0);
+        q0 = RTQuaternion(q0.scalar(), -q0.x(), -q0.y(), -q0.z());
+        q1 *= q0;
+
+        q_recenter = q1;
+
+        if (SERIAL_DEBUG) {
+          Serial.println("Recentered quaternion on device.");
+        }
+        break;
+      }
+
+      case RECEIVE_BETA_ZETA:{
+        float beta = incoming_osc.getFloat(0);
+        float zeta = incoming_osc.getFloat(1);
+
+        imu.setBeta(beta);
+        imu.setBeta(zeta);
+
+        if (SERIAL_DEBUG) {
+          Serial.print("Recentered beta, zeta values: ");
+          Serial.print(beta); Serial.print(", ");
+          Serial.print(zeta); Serial.println("");
+        }
+
+        imu.storeCalibrationData();
+        break;
+      }
+
+      case RECEIVE_ACCEL_SENSOR_ERROR:{
+        float accel_x_min = incoming_osc.getFloat(0);
+        float accel_x_max = incoming_osc.getFloat(1);
+        float accel_y_min = incoming_osc.getFloat(2);
+        float accel_y_max = incoming_osc.getFloat(3);
+        float accel_z_min = incoming_osc.getFloat(4);
+        float accel_z_max = incoming_osc.getFloat(5);
+
+        imu.m_accelMax = RTVector3(accel_x_max, accel_y_max, accel_z_max);
+        imu.m_accelMin = RTVector3(accel_x_min, accel_y_min, accel_z_min);
+        imu.m_accelCalValid = true;
+
+        if (SERIAL_DEBUG) {
+          Serial.print("Received accel sensor error model:");
+          Serial.print(imu.m_accelMin.x()); Serial.print(" ");
+          Serial.print(imu.m_accelMax.x()); Serial.print(" ");
+          Serial.print(imu.m_accelMin.y()); Serial.print(" ");
+          Serial.print(imu.m_accelMax.y()); Serial.print(" ");
+          Serial.print(imu.m_accelMin.z()); Serial.print(" ");
+          Serial.print(imu.m_accelMax.z()); Serial.println();
+        }
+
+        imu.storeCalibrationData();
+        break;
+      }
+
+      case RECEIVE_GYRO_SENSOR_ERROR:{
+        float gyro_x_bias = incoming_osc.getFloat(0);
+        float gyro_y_bias = incoming_osc.getFloat(1);
+        float gyro_z_bias = incoming_osc.getFloat(2);
+
+        if (SERIAL_DEBUG) {
+          Serial.print("Received gyro sensor error model: ");
+          Serial.print(gyro_x_bias); Serial.print(" ");
+          Serial.print(gyro_y_bias); Serial.print(" ");
+          Serial.print(gyro_z_bias); Serial.println();
+        }
+
+        imu.m_gyroBias = RTVector3(gyro_x_bias, gyro_y_bias, gyro_z_bias);
+        imu.m_gyroCalValid = true;
+
+        imu.storeCalibrationData();
+        break;
+      }
+
+      case RECEIVE_MAG_SENSOR_ERROR:{
+        float mag_x_offset = incoming_osc.getFloat(0);
+        float mag_x_scale  = incoming_osc.getFloat(1);
+        float mag_y_offset = incoming_osc.getFloat(2);
+        float mag_y_scale  = incoming_osc.getFloat(3);
+        float mag_z_offset = incoming_osc.getFloat(4);
+        float mag_z_scale  = incoming_osc.getFloat(5);
+
+        if (SERIAL_DEBUG) {
+          Serial.print("Received mag sensor error model: ");
+          Serial.print(mag_x_offset); Serial.print(" ");
+          Serial.print(mag_x_scale);  Serial.print(" ");
+          Serial.print(mag_y_offset); Serial.print(" ");
+          Serial.print(mag_y_scale);  Serial.print(" ");
+          Serial.print(mag_z_offset); Serial.print(" ");
+          Serial.print(mag_z_scale);  Serial.println();
+        }
+
+        imu.m_magOffset = RTVector3(mag_x_offset, mag_y_offset, mag_z_offset);
+        imu.m_magScale  = RTVector3(mag_x_scale, mag_y_scale, mag_z_scale);
+        imu.m_magCalValid = true;
+
+        imu.storeCalibrationData();
+        break;
+      }
+
+      case RECEIVE_HANDLE_CALIBRATION:{
+        int enable_int = incoming_osc.getInt(0);
+        bool enable = enable_int == 1 ? true : false;
+
+        if (SERIAL_DEBUG) {
+          if(enable) {
+            Serial.println("Calibration mode enabled");
+          } else {
+            Serial.println("Calibration mode disabled");
+          }
+        }
+
+        imu.m_calibrationMode = enable;
+        break;
+      }
+
+      case RECEIVE_CLEAR_CALIBRATION:{
+        imu.clearCalibrationData();
+
+        if (SERIAL_DEBUG) {
+          Serial.println("Calibration data cleared");
+        }
+
+        break;
+      }
+
     }
   }
-
+  
+  if (SERIAL_PROC) {
+    time_now_loop = millis();
+    Serial.print("Between loop: "); Serial.println(time_now_loop - time_past_loop);
+    time_past_loop = time_now_loop;
+  }
+  
   if (imu.isInterrupted()) {
-    imu.readAllData();
+    bool read_data = imu.readMagData();
+
+    // Data stored in fifo buffer is utter trash. Need to read accel/gyro data 
+    // directly from raw data registers on the MPU9250.
+    imu.readAccData();
+    imu.readGyrData();
+
+    if (SERIAL_PROC) {
+      time_now = millis();
+      Serial.print("Between readings: "); Serial.println(time_now   - time_past);
+      time_past = time_now;
+    }
+    
+    if(SERIAL_PROC && !read_data){
+      Serial.println("Didn't read data.");
+    }
+
+    if (SERIAL_PROC) {
+      Serial.print("Accel: ");
+      Serial.print(imu.m_accel.x(), 6); Serial.print(" ");
+      Serial.print(imu.m_accel.y(), 6); Serial.print(" ");
+      Serial.println(imu.m_accel.z(), 6);
+
+      Serial.print("Gyro: ");
+      Serial.print(imu.m_gyro.x(), 6); Serial.print(" ");
+      Serial.print(imu.m_gyro.y(), 6); Serial.print(" ");
+      Serial.println(imu.m_gyro.z(), 6);
+
+      Serial.print("Compass: ");
+      Serial.print(imu.m_compass.x(), 6); Serial.print(" ");
+      Serial.print(imu.m_compass.y(), 6); Serial.print(" ");
+      Serial.println(imu.m_compass.z(), 6);
+
+      Serial.print("Quaternion: ");
+      Serial.print(q.scalar(), 6);   Serial.print(" ");
+      Serial.print(q.x(), 6); Serial.print(" ");
+      Serial.print(q.y(), 6); Serial.print(" ");
+      Serial.println(q.z(), 6);
+    }
+    
     imu.updateFilter(q);
   }
 
   if (interrupt_wifi) {
     interrupt_wifi = false;
 
-    float yaw, pitch, roll;
-    yaw   = atan2(2.0f * (q[1] * q[2] + q[0] * q[3]), q[0] * q[0] + q[1] * q[1] - q[2] * q[2] - q[3] * q[3]);
-    pitch = asin(2.0f * (q[1] * q[3] - q[0] * q[2]));
-    roll  = atan2(2.0f * (q[0] * q[1] + q[2] * q[3]), q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3]);
-    pitch *= 180.0f / PI;
-    yaw   *= 180.0f / PI;
-    roll  *= 180.0f / PI;
+    q_corr = q_recenter * q;
+    q_corr.toEuler(eulerAngles);
 
     OSCMessage msg("/q");
-    msg.add(q[0]);
-    msg.add(q[1]);
-    msg.add(q[2]);
-    msg.add(q[3]);
+    msg.add(q_corr.scalar());
+    msg.add(q_corr.x());
+    msg.add(q_corr.y());
+    msg.add(q_corr.z());
     udp.beginPacket(sendIP, SEND_PORT);
     msg.send(udp);
     udp.endPacket();
 
-    OSCMessage msg_rpy("/rpy");
-    msg_rpy.add(roll);
-    msg_rpy.add(pitch);
-    msg_rpy.add(yaw);
+    OSCMessage msg_rpy("/euler_rpy");
+    msg_rpy.add(eulerAngles.x());
+    msg_rpy.add(eulerAngles.y());
+    msg_rpy.add(eulerAngles.z());
     udp.beginPacket(sendIP, SEND_PORT);
     msg_rpy.send(udp);
     udp.endPacket();
@@ -243,7 +487,7 @@ void loop() {
     udp.beginPacket(sendIP, SEND_PORT);
     msg_acc.send(udp);
     udp.endPacket();
-    
+
 
     OSCMessage msg_gyr("/gyr");
     msg_gyr.add(imu.m_gyro.x());
@@ -252,6 +496,7 @@ void loop() {
     udp.beginPacket(sendIP, SEND_PORT);
     msg_gyr.send(udp);
     udp.endPacket();
+
 
     OSCMessage msg_mag("/mag");
     msg_mag.add(imu.m_compass.x());
@@ -302,9 +547,9 @@ void loop() {
       Serial.println(imu.m_accel.z(), 6);
 
       Serial.print("Gyro: ");
-      Serial.print(imu.m_gyro.x(), 6);   Serial.print(" ");
-      Serial.print(imu.m_gyro.y(), 6); Serial.print(" ");
-      Serial.println(imu.m_gyro.z(), 6);
+      Serial.print(imu.m_gyro.x() * RTMATH_DEGREE_TO_RAD, 6);   Serial.print(" ");
+      Serial.print(imu.m_gyro.y() * RTMATH_DEGREE_TO_RAD, 6); Serial.print(" ");
+      Serial.println(imu.m_gyro.z() * RTMATH_DEGREE_TO_RAD, 6);
 
       Serial.print("Compass: ");
       Serial.print(imu.m_compass.x(), 6);   Serial.print(" ");
@@ -312,13 +557,12 @@ void loop() {
       Serial.println(imu.m_compass.z(), 6);
 
       Serial.print("Quaternion: ");
-      Serial.print(q[0], 6);   Serial.print(" ");
-      Serial.print(q[1], 6); Serial.print(" ");
-      Serial.print(q[2], 6); Serial.print(" ");
-      Serial.println(q[3], 6);
+      Serial.print(q.scalar(), 6);   Serial.print(" ");
+      Serial.print(q.x(), 6); Serial.print(" ");
+      Serial.print(q.y(), 6); Serial.print(" ");
+      Serial.println(q.z(), 6);
     }
   }
 
   yield();
-  delay(50); // added this wait function, have to research if it does any good
 }

@@ -37,7 +37,7 @@ typedef float RTFLOAT;
 
 //  Useful constants
 
-#define	RTMATH_PI                   3.1415926535
+#define	RTMATH_PI                   3.141592653589793238
 #define	RTMATH_DEGREE_TO_RAD        (M_PI / 180.0)
 #define	RTMATH_RAD_TO_DEGREE        (180.0 / M_PI)
 

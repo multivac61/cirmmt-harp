@@ -1,30 +1,8 @@
 #include <math.h>
-#include "RTMath.h"
+#include "quaternionFilters.h"
 
-#define PI          acos(-1.0)
-#define DEG_TO_RAD  (PI / 180.0)
-#define RAD_TO_DEG  (180.0 / PI)
 
-// global constants for 9 DoF fusion and AHRS (Attitude and Heading Reference System)
-float GyroMeasError = PI * (25.0f / 180.0f);   // gyroscope measurement error in rads/s (start at 40 deg/s)
-float GyroMeasDrift = PI * (0.1f  / 180.0f);   // gyroscope measurement drift in rad/s/s (start at 0.0 deg/s/s)
-
-// There is a tradeoff in the beta parameter between accuracy and response speed.
-// In the original Madgwick study, beta of 0.041 (corresponding to GyroMeasError of 2.7 degrees/s) was found to give optimal accuracy.
-// However, with this value, the LSM9SD0 response time is about 10 seconds to a stable initial quaternion.
-// Subsequent changes also require a longish lag time to a stable output, not fast enough for a quadcopter or robot car!
-// By increasing beta (GyroMeasError) by about a factor of fifteen, the response time constant is reduced to ~2 sec
-// I haven't noticed any reduction in solution accuracy. This is essentially the I coefficient in a PID control sense;
-// the bigger the feedback coefficient, the faster the solution converges, usually at the expense of accuracy.
-// In any case, this is the free parameter in the Madgwick filtering and fusion scheme.
-float beta = sqrt(3.0f / 4.0f) * GyroMeasError;   // compute beta
-float zeta = sqrt(3.0f / 4.0f) * GyroMeasDrift;   // compute zeta, the other free parameter in the Madgwick scheme usually set to a small or zero value
-#define Kp 2.0f * 5.0f // these are the free parameters in the Mahony filter and fusion scheme, Kp for proportional feedback, Ki for integral
-#define Ki 0.0f
-
-float eInt[3] = {0.0f, 0.0f, 0.0f};       // vector to hold integral error for Mahony method
-
-float fast_inv_sqrt(float x) {
+const float fast_inv_sqrt(const float x) {
     unsigned int i = 0x5F1F1412 - (*(unsigned int*)&x >> 1);
     float tmp = *(float*)&i;
     return tmp * (1.69000231f - 0.714158168f * x * tmp * tmp);
@@ -33,25 +11,25 @@ float fast_inv_sqrt(float x) {
 // Implementation of Sebastian Madgwick's "...efficient orientation filter for... inertial/magnetic sensor arrays"
 // (see http://www.x-io.co.uk/category/open-source/ for examples and more details)
 // which fuses acceleration, rotation rate, and magnetic moments to produce a quaternion-based estimate of absolute
-// device orientation -- which can be converted to yaw, PItch, and roll. Useful for stabilizing quadcopters, etc.
+// device orientation -- which can be converted to yaw, RTMATH_PItch, and roll. Useful for stabilizing quadcopters, etc.
 // The performance of the orientation filter is at least as good as conventional Kalman-based filtering algorithms
 // but is much less computationally intensive---it can be performed on a 3.3 V Pro Mini operating at 8 MHz!
-void MadgwickQuaternionUpdate(float *q, const RTVector3& accData, const RTVector3& gyrData, const RTVector3& magData, float delta_t) {
+void MadgwickQuaternionUpdate(RTQuaternion& q, const RTVector3& accData, const RTVector3& gyrData, const RTVector3& magData, float beta, float zeta, float delta_t) {
   float recipNorm;
   float s0, s1, s2, s3;
   float qDot1, qDot2, qDot3, qDot4;
   float hx, hy;
   float _2q0mx, _2q0my, _2q0mz, _2q1mx, _2bx, _2bz, _4bx, _4bz, _2q0, _2q1, _2q2, _2q3, _2q0q2, _2q2q3, q0q0, q0q1, q0q2, q0q3, q1q1, q1q2, q1q3, q2q2, q2q3, q3q3;
-  float gx = gyrData.x() * DEG_TO_RAD;
-  float gy = gyrData.y() * DEG_TO_RAD;
-  float gz = gyrData.z() * DEG_TO_RAD;
+  float gx = gyrData.x() * RTMATH_DEGREE_TO_RAD;
+  float gy = gyrData.y() * RTMATH_DEGREE_TO_RAD;
+  float gz = gyrData.z() * RTMATH_DEGREE_TO_RAD;
   float ax = accData.x();
   float ay = accData.y();
   float az = accData.z();
   float mx = magData.x();
   float my = magData.y();
   float mz = magData.z();
-  float q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];   // short name local variable for readability
+  float q0 = q.scalar(), q1 = q.x(), q2 = q.y(), q3 = q.z();   // short name local variable for readability
 
   // Rate of change of quaternion from gyroscope
   qDot1 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
@@ -128,13 +106,18 @@ void MadgwickQuaternionUpdate(float *q, const RTVector3& accData, const RTVector
   q2 += qDot3 * delta_t;
   q3 += qDot4 * delta_t;
 
-  recipNorm = sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);    // normalise quaternion
-  recipNorm = 1.0f / recipNorm;
-  q[0] = q0 * recipNorm;
-  q[1] = q1 * recipNorm;
-  q[2] = q2 * recipNorm;
-  q[3] = q3 * recipNorm;
+  q.setScalar(q0);
+  q.setX(q1);
+  q.setY(q2);
+  q.setZ(q3);
+
+  q.normalize();
 }
+
+#define Kp 2.0f * 5.0f // these are the free parameters in the Mahony filter and fusion scheme, Kp for proportional feedback, Ki for integral
+#define Ki 0.0f
+
+float eInt[3] = {0.0f, 0.0f, 0.0f};       // vector to hold integral error for Mahony method
 
 // Similar to Madgwick scheme but uses proportional and integral filtering on the error between estimated reference vectors and
 // measured ones.
@@ -163,9 +146,9 @@ void MahonyQuaternionUpdate(float *q, const RTVector3& accData, const RTVector3&
   float ax = accData.x();
   float ay = accData.y();
   float az = accData.z();
-  float gx = gyrData.x() * PI / 180.0f;
-  float gy = gyrData.y() * PI / 180.0f;
-  float gz = gyrData.z() * PI / 180.0f;
+  float gx = gyrData.x() * RTMATH_PI / 180.0f;
+  float gy = gyrData.y() * RTMATH_PI / 180.0f;
+  float gz = gyrData.z() * RTMATH_PI / 180.0f;
   float mx = magData.x();
   float my = magData.y();
   float mz = magData.z();
