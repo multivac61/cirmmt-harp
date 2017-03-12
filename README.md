@@ -28,15 +28,22 @@ The way the wireless MARG module works is that it takes a static IP address on a
 #### OSC inputs
 Module is listening to OSC messages over UDP on a port defined in `.ino` code under the constant `LISTEN_PORT`. It expects two different OSC messages:
 
-* `/drv effect0, ..., effect7` - effect 0-7 are integer values [0, 123] that determine which effect the DRV2506 haptic driver should render. If less than 8 effects are needed you can halt the skip the remaining effects by placing a -1 value after the last effect you wish to send.
-* `/led red green blue` - red, green, blue are inter values [0, 255] that determine the brightness of the onboard RGB LED.
+* `/d effect0, ..., effect7` - effect 0-7 are integer values [0, 123] that determine which effect the DRV2506 haptic driver should render. If less than 8 effects are needed you can halt the skip the remaining effects by placing a -1 value after the last effect you wish to send.
+* `/l red green blue` - red, green, blue are inter values [0, 255] that determine the brightness of the onboard RGB LED.
+* `/r ` - recenter quaternion on board.
+* `/b beta zeta` - send beta and zeta values for the Madgwick sensor fusion algorithm.
+* `/h bool` - bool indicates if handling of calibration is being done.
+* `/a bool` - bool indicates if current accelerometer sensor error model is valid.
+* `/g bool` - bool indicates if current gyro sensor error model is valid.
+* `/m bool` - bool indicates if current magnetometer sensor error model is valid.
+* `/c` - clear current sensor error model on device.
 
 #### OSC outputs
 The module is sends a continuous stream of OSC messages over UDP to a port defined in .ino code under the constant `SEND_PORT`. It sends data at a rate defined by the interval `WAIT_WIFI`. The directories it sends data to are the following:
 * `/acc acc_x, acc_y, acc_z` - acc_x, acc_y, acc_z are the floating point xyz-axis accelerometer data in g. 
 * `/gyr gyr_x, gyr_y, gyr_z` - gyr_x, gyr_y, gyr_z are the floating point xyz-axis gyroscope data in rad/s.
 * `/mag mag_x, mag_y, mag_z` - mag_x, mag_y, mag_z are the floating point xyz-axis magnetometer data in Gaussians.
-* `/rpy roll pitch yaw` - roll, pitch, yaw are the [-180, 180[ degrees orientation data.
+* `/euler_rpy roll pitch yaw` - roll, pitch, yaw, euler angles in rad/s.
 * `/q q0 q1 q2 q3` - q0, q1, q2, q3 are the floating point quaternion orientation data.
 
 ## Hardware 

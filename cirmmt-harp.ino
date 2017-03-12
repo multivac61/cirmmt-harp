@@ -9,7 +9,6 @@
 #include "OSCData.h"
 #include "RTMath.h"
 
-
 extern "C" {
 #include "user_interface.h"
 }
